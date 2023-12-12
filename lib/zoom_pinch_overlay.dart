@@ -87,15 +87,15 @@ class ZoomOverlay extends StatefulWidget {
   _ZoomOverlayState createState() => _ZoomOverlayState();
 }
 
-class _ZoomOverlayState extends State<ZoomOverlay>
-    with TickerProviderStateMixin {
+class _ZoomOverlayState extends State<ZoomOverlay> with TickerProviderStateMixin {
   Matrix4? _matrix = Matrix4.identity();
   late Offset _startFocalPoint;
   late Animation<Matrix4> _animationReset;
   late AnimationController _controllerReset;
   OverlayEntry? _overlayEntry;
   bool _isZooming = false;
-  int _touchCount = 0;
+  final _pointers = <_PointerInfo>[];
+  double startDistance = 0;
   Matrix4 _transformMatrix = Matrix4.identity();
 
   final _transformWidget = GlobalKey<_TransformWidgetState>();
@@ -127,26 +127,49 @@ class _ZoomOverlayState extends State<ZoomOverlay>
   @override
   Widget build(BuildContext context) {
     return Listener(
-      onPointerDown: _incrementEnter,
-      onPointerUp: _incrementExit,
-      onPointerCancel: _incrementExit,
-      child: GestureDetector(
-        onScaleStart: onScaleStart,
-        onScaleUpdate: onScaleUpdate,
-        onScaleEnd: onScaleEnd,
-        child: Opacity(opacity: _isZooming ? 0 : 1, child: widget.child),
-      ),
+      behavior: HitTestBehavior.opaque,
+      onPointerDown: (v) {
+        _pointers.add(_PointerInfo(v.position, v.pointer));
+        if (_pointers.length >= 2) {
+          final position = (_pointers[0].position + _pointers[1].position) / 2;
+          startDistance = (_pointers[0].position - _pointers[1].position).distance;
+          onScaleStart(position);
+        }
+      },
+      onPointerUp: (v) {
+        _pointers.removeWhere((element) => element.id == v.pointer);
+        if (_pointers.length < 2) {
+          onScaleEnd();
+        }
+      },
+      onPointerCancel: (v) {
+        _pointers.removeWhere((element) => element.id == v.pointer);
+        if (_pointers.length < 2) {
+          onScaleEnd();
+        }
+      },
+      onPointerMove: (v) {
+        final index = _pointers.indexWhere((element) => element.id == v.pointer);
+        _pointers[index] = _PointerInfo(v.position, v.pointer);
+
+        if (_pointers.length >= 2) {
+          final position = (_pointers[0].position + _pointers[1].position) / 2;
+          final scale = (_pointers[0].position - _pointers[1].position).distance / startDistance;
+          onScaleUpdate(position, scale);
+        }
+      },
+      child: Opacity(opacity: _isZooming ? 0 : 1, child: widget.child),
     );
   }
 
-  void onScaleStart(ScaleStartDetails details) {
+  void onScaleStart(Offset focalPoint) {
     //Dont start the effect if the image havent reset complete.
     if (_controllerReset.isAnimating) return;
-    if (widget.twoTouchOnly && _touchCount < 2) return;
+    if (widget.twoTouchOnly && _pointers.length < 2) return;
 
     // call start callback before everything else
     widget.onScaleStart?.call();
-    _startFocalPoint = details.focalPoint;
+    _startFocalPoint = focalPoint;
 
     _matrix = Matrix4.identity();
 
@@ -160,48 +183,42 @@ class _ZoomOverlayState extends State<ZoomOverlay>
 
     show();
 
-    setState(() {
-      _isZooming = true;
-    });
+    setState(() => _isZooming = true);
   }
 
-  void onScaleUpdate(ScaleUpdateDetails details) {
+  void onScaleUpdate(Offset focalPoint, double scale) {
     if (!_isZooming || _controllerReset.isAnimating) return;
 
-    final translationDelta = details.focalPoint - _startFocalPoint;
+    final translationDelta = focalPoint - _startFocalPoint;
 
     final translate = Matrix4.translation(
       Vector3(translationDelta.dx, translationDelta.dy, 0),
     );
 
     final renderBox = context.findRenderObject() as RenderBox;
-    final focalPoint = renderBox.globalToLocal(
-      details.focalPoint - translationDelta,
-    );
+    final localFocalPoint = renderBox.globalToLocal(focalPoint - translationDelta);
 
-    var scaleby = details.scale;
-    if (widget.minScale != null && scaleby < widget.minScale!) {
-      scaleby = widget.minScale ?? 0;
+    if (widget.minScale != null && scale < widget.minScale!) {
+      scale = widget.minScale ?? 0;
     }
 
-    if (widget.maxScale != null && scaleby > widget.maxScale!) {
-      scaleby = widget.maxScale ?? 0;
+    if (widget.maxScale != null && scale > widget.maxScale!) {
+      scale = widget.maxScale ?? 0;
     }
 
-    final dx = (1 - scaleby) * focalPoint.dx;
-    final dy = (1 - scaleby) * focalPoint.dy;
+    final dx = (1 - scale) * localFocalPoint.dx;
+    final dy = (1 - scale) * localFocalPoint.dy;
 
-    final scale =
-        Matrix4(scaleby, 0, 0, 0, 0, scaleby, 0, 0, 0, 0, 1, 0, dx, dy, 0, 1);
+    final scaleMatrix = Matrix4(scale, 0, 0, 0, 0, scale, 0, 0, 0, 0, 1, 0, dx, dy, 0, 1);
 
-    _matrix = translate * scale;
+    _matrix = translate * scaleMatrix;
 
     if (_transformWidget.currentState != null) {
       _transformWidget.currentState!.setMatrix(_matrix);
     }
   }
 
-  void onScaleEnd(ScaleEndDetails details) {
+  void onScaleEnd() {
     if (!_isZooming || _controllerReset.isAnimating) return;
     _animationReset = Matrix4Tween(
       begin: _matrix,
@@ -253,8 +270,11 @@ class _ZoomOverlayState extends State<ZoomOverlay>
     _overlayEntry?.remove();
     _overlayEntry = null;
   }
+}
 
-  void _incrementEnter(PointerEvent details) => _touchCount++;
+class _PointerInfo {
+  final Offset position;
+  final int id;
 
-  void _incrementExit(PointerEvent details) => _touchCount--;
+  const _PointerInfo(this.position, this.id);
 }
